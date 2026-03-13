@@ -1,0 +1,687 @@
+openapi: "3.1.0"
+info:
+  title: EcoReport API
+  version: "0.1.0"
+  description: |
+    Environmental compliance reporting API for Russian market.
+    Forms: 2-TP Waste, 2-TP Air, 2-TP Water per Order #757 (26.12.2024).
+
+servers:
+  - url: /api
+    description: Next.js API routes (relative)
+
+components:
+  securitySchemes:
+    session:
+      type: apiKey
+      in: cookie
+      name: next-auth.session-token
+      description: NextAuth.js session cookie (HttpOnly, Secure, SameSite=Lax)
+
+  schemas:
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          enum:
+            - VALIDATION_ERROR
+            - NOT_FOUND
+            - UNAUTHORIZED
+            - FORBIDDEN
+            - CONFLICT
+            - INTERNAL_ERROR
+        message:
+          type: string
+        details:
+          type: object
+        traceId:
+          type: string
+
+    Organization:
+      type: object
+      required: [id, name, inn]
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+          maxLength: 255
+        inn:
+          type: string
+          pattern: '^\d{10,12}$'
+        kpp:
+          type: string
+          pattern: '^\d{9}$'
+        ogrn:
+          type: string
+          pattern: '^\d{13,15}$'
+        legalAddress:
+          type: string
+
+    Facility:
+      type: object
+      required: [id, orgId, name, address, nvosCategory]
+      properties:
+        id:
+          type: integer
+        orgId:
+          type: integer
+        name:
+          type: string
+          maxLength: 255
+        address:
+          type: string
+        nvosCategory:
+          type: string
+          enum: ["I", "II", "III", "IV"]
+        nvosRegNumber:
+          type: string
+        okved:
+          type: string
+        requiredReports:
+          type: array
+          items:
+            type: string
+            enum: ["2tp_waste", "2tp_air", "2tp_water"]
+
+    FacilityCreate:
+      type: object
+      required: [name, address, nvosCategory]
+      properties:
+        name:
+          type: string
+          maxLength: 255
+          minLength: 1
+        address:
+          type: string
+          minLength: 1
+        nvosCategory:
+          type: string
+          enum: ["I", "II", "III", "IV"]
+        nvosRegNumber:
+          type: string
+        okved:
+          type: string
+          pattern: '^\d{2}\.\d{2}(\.\d{1,2})?$'
+
+    Report:
+      type: object
+      required: [id, facilityId, type, year, status]
+      properties:
+        id:
+          type: integer
+        facilityId:
+          type: integer
+        type:
+          type: string
+          enum: ["2tp_waste", "2tp_air", "2tp_water"]
+        year:
+          type: integer
+          minimum: 2020
+          maximum: 2100
+        status:
+          type: string
+          enum: ["draft", "validated", "submitted"]
+        data:
+          type: object
+          description: Form-specific JSON data
+        validationErrors:
+          type: array
+          items:
+            $ref: "#/components/schemas/ValidationError"
+        pdfUrl:
+          type: string
+
+    ReportCreate:
+      type: object
+      required: [facilityId, type, year]
+      properties:
+        facilityId:
+          type: integer
+        type:
+          type: string
+          enum: ["2tp_waste", "2tp_air", "2tp_water"]
+        year:
+          type: integer
+          minimum: 2020
+          maximum: 2100
+
+    ReportUpdate:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: object
+          description: Partial form data (merged with existing)
+
+    ValidationError:
+      type: object
+      required: [field, message, severity]
+      properties:
+        field:
+          type: string
+        message:
+          type: string
+        severity:
+          type: string
+          enum: ["error", "warning"]
+        row:
+          type: integer
+
+    ValidationResult:
+      type: object
+      required: [valid, errors]
+      properties:
+        valid:
+          type: boolean
+        errors:
+          type: array
+          items:
+            $ref: "#/components/schemas/ValidationError"
+
+    WasteClassifier:
+      type: object
+      required: [id, code, name, hazardClass]
+      properties:
+        id:
+          type: integer
+        code:
+          type: string
+        name:
+          type: string
+        hazardClass:
+          type: string
+          enum: ["I", "II", "III", "IV", "V"]
+        parentCode:
+          type: string
+
+    PollutantCode:
+      type: object
+      required: [id, code, name]
+      properties:
+        id:
+          type: integer
+        code:
+          type: string
+        name:
+          type: string
+        casNumber:
+          type: string
+        hazardClass:
+          type: string
+          enum: ["I", "II", "III", "IV", "V"]
+        pdkMr:
+          type: number
+        pdkSs:
+          type: number
+        unit:
+          type: string
+
+    Deadline:
+      type: object
+      required: [id, reportType, deadlineDate, description, year]
+      properties:
+        id:
+          type: integer
+        reportType:
+          type: string
+          enum: ["2tp_waste", "2tp_air", "2tp_water"]
+        deadlineDate:
+          type: string
+          format: date
+        description:
+          type: string
+        nvosCategories:
+          type: array
+          items:
+            type: string
+        year:
+          type: integer
+        daysRemaining:
+          type: integer
+        urgency:
+          type: string
+          enum: ["normal", "warning", "critical", "overdue"]
+
+    DashboardSummary:
+      type: object
+      properties:
+        upcomingDeadlines:
+          type: array
+          items:
+            $ref: "#/components/schemas/Deadline"
+        facilityProgress:
+          type: array
+          items:
+            type: object
+            properties:
+              facilityId:
+                type: integer
+              facilityName:
+                type: string
+              totalReports:
+                type: integer
+              completedReports:
+                type: integer
+
+security:
+  - session: []
+
+paths:
+  # --- Auth ---
+  /auth/register:
+    post:
+      operationId: register
+      tags: [auth]
+      security: []
+      summary: Register new user with organization
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password, orgName]
+              properties:
+                email:
+                  type: string
+                  format: email
+                  maxLength: 255
+                password:
+                  type: string
+                  minLength: 8
+                  maxLength: 128
+                name:
+                  type: string
+                  maxLength: 255
+                orgName:
+                  type: string
+                  maxLength: 255
+                inn:
+                  type: string
+                  pattern: '^\d{10,12}$'
+      responses:
+        "201":
+          description: User created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: integer
+                  email:
+                    type: string
+        "409":
+          description: Email already registered
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /auth/[...nextauth]:
+    get:
+      operationId: nextauthGet
+      tags: [auth]
+      security: []
+      summary: NextAuth.js handler (login, callback, session)
+      responses:
+        "200":
+          description: NextAuth response
+    post:
+      operationId: nextauthPost
+      tags: [auth]
+      security: []
+      summary: NextAuth.js handler (credentials, signout)
+      responses:
+        "200":
+          description: NextAuth response
+
+  # --- Organization ---
+  /organization:
+    get:
+      operationId: getOrganization
+      tags: [organization]
+      summary: Get current user organization
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Organization"
+    put:
+      operationId: updateOrganization
+      tags: [organization]
+      summary: Update organization details
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                inn:
+                  type: string
+                kpp:
+                  type: string
+                ogrn:
+                  type: string
+                legalAddress:
+                  type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Organization"
+
+  # --- Facilities ---
+  /facilities:
+    get:
+      operationId: listFacilities
+      tags: [facilities]
+      summary: List organization facilities
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Facility"
+    post:
+      operationId: createFacility
+      tags: [facilities]
+      summary: Create new facility
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FacilityCreate"
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Facility"
+
+  /facilities/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+    get:
+      operationId: getFacility
+      tags: [facilities]
+      summary: Get facility details with required reports
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Facility"
+    put:
+      operationId: updateFacility
+      tags: [facilities]
+      summary: Update facility
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FacilityCreate"
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Facility"
+    delete:
+      operationId: deleteFacility
+      tags: [facilities]
+      summary: Delete facility and associated reports
+      responses:
+        "204":
+          description: Deleted
+
+  # --- Reports ---
+  /reports:
+    get:
+      operationId: listReports
+      tags: [reports]
+      summary: List reports (filterable by facility and type)
+      parameters:
+        - name: facilityId
+          in: query
+          schema:
+            type: integer
+        - name: type
+          in: query
+          schema:
+            type: string
+            enum: ["2tp_waste", "2tp_air", "2tp_water"]
+        - name: year
+          in: query
+          schema:
+            type: integer
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Report"
+    post:
+      operationId: createReport
+      tags: [reports]
+      summary: Create new report
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReportCreate"
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Report"
+
+  /reports/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+    get:
+      operationId: getReport
+      tags: [reports]
+      summary: Get report with full data
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Report"
+    put:
+      operationId: updateReport
+      tags: [reports]
+      summary: Update report data (save draft)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReportUpdate"
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Report"
+    delete:
+      operationId: deleteReport
+      tags: [reports]
+      summary: Delete report
+      responses:
+        "204":
+          description: Deleted
+
+  /reports/{id}/validate:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+    post:
+      operationId: validateReport
+      tags: [reports]
+      summary: Validate report against Rosprirodnadzor rules
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ValidationResult"
+
+  /reports/{id}/pdf:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+    post:
+      operationId: generatePdf
+      tags: [reports]
+      summary: Generate PDF in Rosprirodnadzor format
+      responses:
+        "200":
+          content:
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+
+  /reports/{id}/submit:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+    post:
+      operationId: submitReport
+      tags: [reports]
+      summary: Mark report as submitted (status -> submitted)
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Report"
+
+  # --- Reference Data ---
+  /reference/waste:
+    get:
+      operationId: searchWaste
+      tags: [reference]
+      summary: Search FKKO waste classifiers
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 2
+          description: Search by code or name (min 2 chars)
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+            maximum: 100
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/WasteClassifier"
+
+  /reference/pollutants:
+    get:
+      operationId: searchPollutants
+      tags: [reference]
+      summary: Search pollutant codes
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 2
+          description: Search by code, name, or CAS number
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+            maximum: 100
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/PollutantCode"
+
+  # --- Calendar / Dashboard ---
+  /dashboard:
+    get:
+      operationId: getDashboard
+      tags: [dashboard]
+      summary: Get dashboard summary with deadlines and progress
+      parameters:
+        - name: year
+          in: query
+          schema:
+            type: integer
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DashboardSummary"
+
+  /deadlines:
+    get:
+      operationId: listDeadlines
+      tags: [dashboard]
+      summary: List deadlines for current year
+      parameters:
+        - name: year
+          in: query
+          schema:
+            type: integer
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Deadline"
